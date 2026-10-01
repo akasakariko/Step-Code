@@ -241,7 +241,8 @@ function formatStepCallTitle(toolName: string, args: unknown, cwd: string): stri
 
 	switch (toolName) {
 		case "run_command":
-			argument = command;
+			argument = command?.split(/[\r\n]/u, 1)[0];
+			if (command && /[\r\n]/u.test(command)) argument = `${argument} …`;
 			break;
 		case "find_files":
 			argument = pattern;
@@ -701,11 +702,14 @@ export class ToolExecutionComponent extends Container {
 		}
 		const callWidth = Math.max(1, safeWidth - 2);
 		const bodyWidth = Math.max(1, safeWidth - 4);
+		const isRunCommand = this.toolName === "run_command";
 
 		let callLines: string[];
 		let resultLines: string[] = [];
 		if (this.hasRendererDefinition()) {
-			callLines = this.stepCallComponent ? trimRenderedRows(this.stepCallComponent.render(callWidth)) : [];
+			callLines = this.stepCallComponent
+				? trimRenderedRows(this.stepCallComponent.render(isRunCommand ? bodyWidth : callWidth))
+				: [];
 			// Failed runs bypass the result renderer: native renderers format
 			// success payloads ("3 matches") and would bury the actual error
 			// text — the why must never be replaced by a success-shaped body.
@@ -724,11 +728,20 @@ export class ToolExecutionComponent extends Container {
 		}
 
 		if (callLines.length === 0) callLines = [theme.fg("toolTitle", theme.bold(this.toolName))];
-		// Some native call renderers (notably `write`) include a preview below
-		// their header. Treat those rows as payload so the Step connector remains
-		// stable and the preview participates in the same collapse budget as a
-		// result renderer's output.
-		if (callLines.length > 1) {
+		const hasCommandBody =
+			isRunCommand && (callLines.length > 1 || /[\r\n]/u.test(readStringArg(this.args, "command") ?? ""));
+		let commandLines: string[] = [];
+		if (hasCommandBody) {
+			// Keep input separate from output: a native result's expand hint must
+			// not exempt a long command from collapsing, or hide its error summary.
+			// Preserve the entire native call (including wrapped first-line text)
+			// behind the Step title, and reveal it only when expanded.
+			commandLines = this.expanded
+				? callLines
+				: [theme.fg("muted", `… (${keyHint("app.tools.expand", "to expand command")})`)];
+			callLines = [callLines[0]!];
+		} else if (callLines.length > 1) {
+			// Other native call previews (notably `write`) share the result budget.
 			resultLines = [...callLines.slice(1), ...resultLines];
 			callLines = [callLines[0]!];
 		}
@@ -767,7 +780,10 @@ export class ToolExecutionComponent extends Container {
 			header[0] = clampStepLine(`${header[0]}${hint}`, safeWidth);
 		}
 
-		const body = this.buildStepBodyLines(resultLines, bodyWidth);
+		const body = [
+			...(commandLines.length > 0 ? this.buildStepBodyLines(commandLines, bodyWidth) : []),
+			...this.buildStepBodyLines(resultLines, bodyWidth),
+		];
 		// 错误呈现三要素收尾：what（✗ 标题行）/ why（错误文本）之后补 how——
 		// 一行可执行的恢复建议，让失败不只是被报告，还能被处理。
 		if (!this.isPartial && this.result?.isError) {
